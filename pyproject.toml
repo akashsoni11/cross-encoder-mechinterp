@@ -1,0 +1,105 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "constraintsuite"
+version = "0.1.0"
+description = "ConstraintSuite: Dataset for evaluating constraint-sensitive relevance in cross-encoder rerankers"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Tanuj Sharma"}
+]
+keywords = [
+    "information-retrieval",
+    "cross-encoder",
+    "reranking",
+    "mechanistic-interpretability",
+    "negation",
+    "constraints"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    # Deep learning
+    "torch>=2.0",
+    "transformers>=4.36",
+    "sentence-transformers>=2.2",
+
+    # IR tooling
+    "beir>=2.0",
+    "pyserini>=0.21",
+    "ir-datasets>=0.5",
+
+    # Data processing
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "tqdm>=4.65",
+
+    # Configuration
+    "pyyaml>=6.0",
+    "hydra-core>=1.3",
+
+    # Utilities
+    "rich>=13.0",
+    "typer>=0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.1",
+    "mypy>=1.0",
+    "pre-commit>=3.0",
+]
+notebooks = [
+    "jupyter>=1.0",
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+    "plotly>=5.15",
+]
+
+[project.scripts]
+constraintsuite = "constraintsuite.cli:app"
+
+[project.urls]
+"Homepage" = "https://github.com/tanujsharma/constraintsuite"
+"Bug Tracker" = "https://github.com/tanujsharma/constraintsuite/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+constraintsuite = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --cov=constraintsuite --cov-report=term-missing"

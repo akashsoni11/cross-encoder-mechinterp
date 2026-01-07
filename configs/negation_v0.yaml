@@ -1,0 +1,148 @@
+# ConstraintSuite v0 Configuration: Negation
+# ===========================================
+# This configuration defines parameters for building the negation-focused
+# slice of ConstraintSuite for mechanistic interpretability research.
+
+# Dataset source configuration
+dataset:
+  # Primary corpus: MS MARCO passages (well-indexed, standard benchmark)
+  source_corpus: "msmarco-passage"
+
+  # Later phases: add BEIR domains for drift experiments
+  # additional_corpora:
+  #   - "beir/scifact"
+  #   - "beir/nfcorpus"
+  #   - "beir/fiqa"
+
+  # Output directory for generated datasets
+  output_dir: "data/release/negation_v0"
+
+  # Intermediate files (candidate pools, filtered pairs)
+  intermediate_dir: "data/intermediate"
+
+# Query generation templates
+query_templates:
+  WITHOUT_Y:
+    pattern: "{topic} without {y}"
+    weight: 0.5  # 50% of generated queries
+  EXCLUDING_Y:
+    pattern: "{topic} excluding {y}"
+    weight: 0.25
+  NOT_ABOUT_Y:
+    pattern: "{topic} not about {y}"
+    weight: 0.25
+
+# Negation markers for detection
+negation_markers:
+  - "\\bno\\b"
+  - "\\bnot\\b"
+  - "\\bwithout\\b"
+  - "\\bfree of\\b"
+  - "\\bexclude[sd]?\\b"
+  - "\\blacks?\\b"
+  - "\\babsent\\b"
+  - "\\b-free\\b"
+
+# BM25 retrieval configuration
+retrieval:
+  method: "bm25"
+  # Pyserini prebuilt index name
+  index_name: "msmarco-v1-passage"
+  # Number of candidates to retrieve per query
+  k_pool: 200
+  # BM25 parameters (default Pyserini values)
+  bm25_k1: 0.9
+  bm25_b: 0.4
+
+# Filtering configuration
+filtering:
+  # Minimum document length (characters)
+  min_doc_length: 50
+  # Maximum document length (characters)
+  max_doc_length: 2000
+  # Maximum length ratio between doc_pos and doc_neg
+  max_doc_length_ratio: 2.0
+  # Minimum lexical overlap with query (Jaccard of terms)
+  min_lexical_overlap: 0.3
+  # Minimum document-document similarity (to ensure topical relevance)
+  min_doc_similarity: 0.2
+  # Window size for checking negation near Y (characters)
+  negation_window: 40
+
+# Difficulty tagging configuration
+tagging:
+  # Lexical overlap bins: [threshold_low, threshold_high]
+  # < threshold_low = "low", < threshold_high = "medium", else "high"
+  lexical_overlap_bins: [0.3, 0.6]
+  # Document length bins (tokens): [short_max, medium_max]
+  doc_length_bins: [128, 256]
+
+# Target sizes
+targets:
+  # Main evaluation set
+  main_set_size: 2000
+  # Gold (manually verified) set
+  gold_set_size: 50
+  # Non-flip control set
+  controls_nonflip_size: 500
+  # Adversarial control set
+  controls_adversarial_size: 200
+
+# Slice distribution (percentages of main set)
+slice_distribution:
+  minpairs: 0.2      # 20% - cleanest for mechanistic analysis
+  explicit: 0.4      # 40% - core evaluation
+  omission: 0.4      # 40% - realistic stress test
+
+# Gold set sampling
+gold_sampling:
+  # Oversample hard examples for gold set
+  oversample_hard: true
+  # Distribution: [easy%, medium%, hard%]
+  difficulty_distribution: [0.15, 0.35, 0.50]
+
+# Model configuration for baseline evaluation
+models:
+  # Fast baseline reranker
+  baseline_reranker: "cross-encoder/ms-marco-MiniLM-L6-v2"
+  # Stronger reranker
+  stronger_reranker: "BAAI/bge-reranker-base"
+  # Batch size for inference
+  batch_size: 32
+  # Device (auto, cuda, cpu)
+  device: "auto"
+
+# Evaluation metrics
+evaluation:
+  metrics:
+    - "pairwise_accuracy"
+    - "mean_score_gap"
+    - "score_gap_std"
+    - "query_sensitivity"
+  # Also evaluate on q_base (for flip consistency)
+  include_base_query: true
+
+# Adversarial control phrases (NOT exclusion constraints)
+adversarial_phrases:
+  - "without further ado"
+  - "without doubt"
+  - "without question"
+  - "not only"
+  - "cannot be overstated"
+  - "nothing but"
+  - "no less than"
+  - "none other than"
+
+# Logging and reproducibility
+logging:
+  level: "INFO"
+  log_file: "logs/negation_v0.log"
+
+random_seed: 42
+
+# Paths
+paths:
+  raw_data: "data/raw"
+  intermediate: "data/intermediate"
+  release: "data/release/negation_v0"
+  logs: "logs"
