@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
-Script 02: Build or verify BM25 index.
+Script 02: Verify BM25 index.
 
-For MS MARCO, we use Pyserini's prebuilt index (no building needed).
-This script verifies the index is accessible and working.
-
-For custom corpora, this script can build a new index.
+Verifies that the prebuilt MS MARCO index is accessible and working.
 
 Usage:
     python scripts/02_build_index.py --config configs/negation_v0.yaml
@@ -13,51 +10,19 @@ Usage:
 """
 
 import argparse
+import sys
 from pathlib import Path
 
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-def verify_prebuilt_index(index_name: str) -> bool:
-    """
-    Verify that a prebuilt Pyserini index is accessible.
-
-    Args:
-        index_name: Pyserini index name (e.g., "msmarco-v1-passage").
-
-    Returns:
-        True if index is accessible.
-    """
-    # TODO: Implementation
-    # Hint:
-    # from pyserini.search.lucene import LuceneSearcher
-    # try:
-    #     searcher = LuceneSearcher.from_prebuilt_index(index_name)
-    #     hits = searcher.search("test query", k=1)
-    #     return len(hits) > 0
-    # except Exception:
-    #     return False
-    raise NotImplementedError("verify_prebuilt_index not yet implemented")
-
-
-def build_custom_index(
-    corpus_path: Path,
-    index_path: Path,
-    threads: int = 4
-) -> None:
-    """
-    Build a custom BM25 index from a JSONL corpus.
-
-    Args:
-        corpus_path: Path to corpus JSONL file.
-        index_path: Path to output index directory.
-        threads: Number of indexing threads.
-    """
-    # TODO: Implementation
-    raise NotImplementedError("build_custom_index not yet implemented")
+from constraintsuite.utils import load_config, setup_logging
+from constraintsuite.retrieval import BM25Retriever, verify_index
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build or verify BM25 index"
+        description="Verify BM25 index for ConstraintSuite"
     )
     parser.add_argument(
         "--config",
@@ -68,26 +33,45 @@ def main():
     parser.add_argument(
         "--verify-only",
         action="store_true",
-        help="Only verify index accessibility"
-    )
-    parser.add_argument(
-        "--index-name",
-        type=str,
-        default="msmarco-v1-passage",
-        help="Pyserini prebuilt index name"
+        help="Only verify the index (default behavior)"
     )
     args = parser.parse_args()
 
+    # Load config
+    config = load_config(args.config)
+    logger = setup_logging(config.get("logging", {}).get("level", "INFO"))
+
     print("=" * 60)
-    print("ConstraintSuite - Index Setup")
+    print("ConstraintSuite - Index Verification")
     print("=" * 60)
 
-    print(f"\nVerifying index: {args.index_name}")
-    if verify_prebuilt_index(args.index_name):
-        print("✓ Index is accessible and working")
+    # Get index name from config
+    index_name = config.get("retrieval", {}).get("index_name", "msmarco-v1-passage")
+
+    print(f"\nVerifying index: {index_name}")
+
+    # Verify index
+    if verify_index(index_name):
+        print("\n[OK] Index verification passed!")
+
+        # Run a test query
+        print("\nRunning test query...")
+        retriever = BM25Retriever(index_name)
+        results = retriever.retrieve("python web scraping", k=5)
+
+        print(f"Top 5 results for 'python web scraping':")
+        for i, doc in enumerate(results):
+            text_preview = doc["text"][:100].replace("\n", " ")
+            print(f"  {i+1}. {doc['doc_id']}: {text_preview}...")
+
     else:
-        print("✗ Index verification failed")
-        exit(1)
+        print("\n[FAIL] Index verification failed!")
+        print("Please run: python scripts/01_download_data.py --index-only")
+        sys.exit(1)
+
+    print("\n" + "=" * 60)
+    print("Index verification complete!")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

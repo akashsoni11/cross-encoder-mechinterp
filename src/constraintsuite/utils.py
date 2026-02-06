@@ -37,8 +37,18 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
         >>> print(config["dataset"]["source_corpus"])
         'msmarco-passage'
     """
-    # TODO: Implementation
-    raise NotImplementedError("load_config not yet implemented")
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    # Basic validation
+    if config is None:
+        raise ValueError(f"Empty config file: {config_path}")
+
+    return config
 
 
 def save_jsonl(data: list[dict], output_path: str | Path) -> None:
@@ -53,8 +63,12 @@ def save_jsonl(data: list[dict], output_path: str | Path) -> None:
         >>> examples = [{"id": "001", "query": "test"}]
         >>> save_jsonl(examples, "data/output.jsonl")
     """
-    # TODO: Implementation
-    raise NotImplementedError("save_jsonl not yet implemented")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        for item in data:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
 def load_jsonl(input_path: str | Path) -> list[dict]:
@@ -76,8 +90,24 @@ def load_jsonl(input_path: str | Path) -> list[dict]:
         >>> print(len(examples))
         2000
     """
-    # TODO: Implementation
-    raise NotImplementedError("load_jsonl not yet implemented")
+    input_path = Path(input_path)
+    if not input_path.exists():
+        raise FileNotFoundError(f"File not found: {input_path}")
+
+    data = []
+    with open(input_path, "r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if line:  # Skip empty lines
+                try:
+                    data.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    raise json.JSONDecodeError(
+                        f"Invalid JSON on line {line_num}: {e.msg}",
+                        e.doc,
+                        e.pos
+                    )
+    return data
 
 
 def iter_jsonl(input_path: str | Path) -> Iterator[dict]:
@@ -94,8 +124,15 @@ def iter_jsonl(input_path: str | Path) -> Iterator[dict]:
         >>> for example in iter_jsonl("data/large_file.jsonl"):
         ...     process(example)
     """
-    # TODO: Implementation
-    raise NotImplementedError("iter_jsonl not yet implemented")
+    input_path = Path(input_path)
+    if not input_path.exists():
+        raise FileNotFoundError(f"File not found: {input_path}")
+
+    with open(input_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                yield json.loads(line)
 
 
 def setup_logging(
@@ -116,8 +153,35 @@ def setup_logging(
         >>> logger = setup_logging("DEBUG", "logs/run.log")
         >>> logger.info("Starting pipeline")
     """
-    # TODO: Implementation
-    raise NotImplementedError("setup_logging not yet implemented")
+    # Get the root logger for constraintsuite
+    logger = logging.getLogger("constraintsuite")
+    logger.setLevel(getattr(logging, level.upper()))
+
+    # Clear existing handlers
+    logger.handlers.clear()
+
+    # Create formatter
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(getattr(logging, level.upper()))
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # File handler (optional)
+    if log_file is not None:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setLevel(getattr(logging, level.upper()))
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+    return logger
 
 
 def set_seed(seed: int) -> None:
@@ -135,8 +199,21 @@ def set_seed(seed: int) -> None:
     Example:
         >>> set_seed(42)
     """
-    # TODO: Implementation
-    raise NotImplementedError("set_seed not yet implemented")
+    random.seed(seed)
+    np.random.seed(seed)
+
+    # Try to set PyTorch seed if available
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        # For MPS (Apple Silicon)
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            # MPS doesn't have a separate seed function, torch.manual_seed covers it
+            pass
+    except ImportError:
+        pass  # PyTorch not installed
 
 
 def ensure_dir(path: str | Path) -> Path:
@@ -152,5 +229,19 @@ def ensure_dir(path: str | Path) -> Path:
     Example:
         >>> output_dir = ensure_dir("data/intermediate/candidates")
     """
-    # TODO: Implementation
-    raise NotImplementedError("ensure_dir not yet implemented")
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_logger(name: str = "constraintsuite") -> logging.Logger:
+    """
+    Get a logger instance.
+
+    Args:
+        name: Logger name.
+
+    Returns:
+        Logger instance.
+    """
+    return logging.getLogger(name)

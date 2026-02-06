@@ -9,8 +9,15 @@ This module provides functions for:
 Primary tool: Pyserini with prebuilt MS MARCO index.
 """
 
+import json
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+
+from pyserini.search.lucene import LuceneSearcher
+
+logger = logging.getLogger("constraintsuite")
 
 
 class BM25Retriever:
@@ -52,10 +59,24 @@ class BM25Retriever:
         Note:
             First-time initialization will download the index (~2GB for MS MARCO).
         """
-        # TODO: Implementation
-        # Hint: from pyserini.search.lucene import LuceneSearcher
-        # self.searcher = LuceneSearcher.from_prebuilt_index(index_name)
-        raise NotImplementedError("BM25Retriever.__init__ not yet implemented")
+        self.index_name = index_name
+        self.k1 = k1
+        self.b = b
+
+        logger.info(f"Loading BM25 index: {index_name}")
+
+        # Load prebuilt or custom index
+        if Path(index_name).exists():
+            # Custom index path
+            self.searcher = LuceneSearcher(index_name)
+        else:
+            # Prebuilt index
+            self.searcher = LuceneSearcher.from_prebuilt_index(index_name)
+
+        # Set BM25 parameters
+        self.searcher.set_bm25(k1, b)
+
+        logger.info(f"BM25 retriever initialized with k1={k1}, b={b}")
 
     def retrieve(
         self,
@@ -82,14 +103,77 @@ class BM25Retriever:
             >>> print(candidates[0]["doc_id"])
             'msmarco:1234567'
         """
-        # TODO: Implementation
-        raise NotImplementedError("BM25Retriever.retrieve not yet implemented")
+        hits = self.searcher.search(query, k=k)
+
+        candidates = []
+        for rank, hit in enumerate(hits):
+            doc = self._parse_document(hit)
+            doc["bm25_rank"] = rank
+            doc["bm25_score"] = hit.score
+            candidates.append(doc)
+
+        return candidates
+
+    def _parse_document(self, hit) -> dict[str, Any]:
+        """Parse a Pyserini hit into a document dict."""
+        doc_id = hit.docid
+
+        # Try to get the raw document content
+        raw = hit.lucene_document.get("raw")
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                return {
+                    "doc_id": doc_id,
+                    "text": parsed.get("contents", parsed.get("text", "")),
+                    "title": parsed.get("title"),
+                }
+            except json.JSONDecodeError:
+                # Raw field is plain text
+                return {
+                    "doc_id": doc_id,
+                    "text": raw,
+                    "title": None,
+                }
+
+        # Fall back to contents field
+        contents = hit.lucene_document.get("contents")
+        if contents:
+            return {
+                "doc_id": doc_id,
+                "text": contents,
+                "title": None,
+            }
+
+        # Last resort: fetch document directly
+        fetched = self.searcher.doc(doc_id)
+        if fetched:
+            raw = fetched.raw()
+            try:
+                parsed = json.loads(raw)
+                return {
+                    "doc_id": doc_id,
+                    "text": parsed.get("contents", parsed.get("text", "")),
+                    "title": parsed.get("title"),
+                }
+            except json.JSONDecodeError:
+                return {
+                    "doc_id": doc_id,
+                    "text": raw,
+                    "title": None,
+                }
+
+        return {
+            "doc_id": doc_id,
+            "text": "",
+            "title": None,
+        }
 
     def retrieve_batch(
         self,
         queries: list[tuple[str, str]],
         k: int = 200,
-        threads: int = 4
+        threads: int = 8
     ) -> dict[str, list[dict[str, Any]]]:
         """
         Batch retrieve for multiple queries.
@@ -108,8 +192,33 @@ class BM25Retriever:
             >>> print(len(results["q1"]))
             200
         """
-        # TODO: Implementation
-        raise NotImplementedError("BM25Retriever.retrieve_batch not yet implemented")
+        results = {}
+
+        # Use batch search for efficiency
+        query_ids = [qid for qid, _ in queries]
+        query_texts = [qtext for _, qtext in queries]
+
+        # Pyserini's batch search
+        batch_hits = self.searcher.batch_search(
+            queries=query_texts,
+            qids=query_ids,
+            k=k,
+            threads=threads
+        )
+
+        # Parse results
+        for qid in query_ids:
+            hits = batch_hits.get(qid, [])
+            candidates = []
+            for rank, hit in enumerate(hits):
+                doc = self._parse_document(hit)
+                doc["bm25_rank"] = rank
+                doc["bm25_score"] = hit.score
+                candidates.append(doc)
+            results[qid] = candidates
+
+        logger.info(f"Retrieved candidates for {len(results)} queries")
+        return results
 
     def get_document(self, doc_id: str) -> dict[str, Any] | None:
         """
@@ -125,8 +234,28 @@ class BM25Retriever:
             >>> doc = retriever.get_document("msmarco:1234567")
             >>> print(doc["text"][:100])
         """
-        # TODO: Implementation
-        raise NotImplementedError("BM25Retriever.get_document not yet implemented")
+        doc = self.searcher.doc(doc_id)
+        if doc is None:
+            return None
+
+        raw = doc.raw()
+        try:
+            parsed = json.loads(raw)
+            return {
+                "doc_id": doc_id,
+                "text": parsed.get("contents", parsed.get("text", "")),
+                "title": parsed.get("title"),
+            }
+        except json.JSONDecodeError:
+            return {
+                "doc_id": doc_id,
+                "text": raw,
+                "title": None,
+            }
+
+    def __len__(self) -> int:
+        """Return the number of documents in the index."""
+        return self.searcher.num_docs
 
 
 def build_custom_index(
@@ -150,5 +279,50 @@ def build_custom_index(
         For MS MARCO, prefer using prebuilt indexes.
         Custom indexing is useful for BEIR domains or custom corpora.
     """
-    # TODO: Implementation
-    raise NotImplementedError("build_custom_index not yet implemented")
+    import subprocess
+    import shutil
+
+    corpus_path = Path(corpus_path)
+    index_path = Path(index_path)
+
+    if not corpus_path.exists():
+        raise FileNotFoundError(f"Corpus file not found: {corpus_path}")
+
+    # Create output directory
+    index_path.mkdir(parents=True, exist_ok=True)
+
+    # Build index using Pyserini CLI
+    cmd = [
+        "python", "-m", "pyserini.index.lucene",
+        "--collection", "JsonCollection",
+        "--input", str(corpus_path.parent),
+        "--index", str(index_path),
+        "--generator", "DefaultLuceneDocumentGenerator",
+        "--threads", str(threads),
+        "--storePositions", "--storeDocvectors", "--storeRaw",
+    ]
+
+    logger.info(f"Building index at {index_path}")
+    subprocess.run(cmd, check=True)
+    logger.info("Index build complete")
+
+
+def verify_index(index_name: str = "msmarco-v1-passage") -> bool:
+    """
+    Verify that an index is accessible and working.
+
+    Args:
+        index_name: Pyserini prebuilt index name or path.
+
+    Returns:
+        True if index is working, False otherwise.
+    """
+    try:
+        retriever = BM25Retriever(index_name)
+        # Test query
+        results = retriever.retrieve("test query", k=1)
+        logger.info(f"Index verification passed: {len(retriever)} documents")
+        return True
+    except Exception as e:
+        logger.error(f"Index verification failed: {e}")
+        return False

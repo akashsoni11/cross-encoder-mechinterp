@@ -13,7 +13,13 @@ Usage:
 """
 
 import argparse
+import sys
 from pathlib import Path
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from constraintsuite.utils import load_config, setup_logging, ensure_dir
 
 
 def download_msmarco_index(output_dir: Path) -> None:
@@ -25,12 +31,14 @@ def download_msmarco_index(output_dir: Path) -> None:
     Args:
         output_dir: Directory for any local caching.
     """
-    # TODO: Implementation
-    # Hint:
-    # from pyserini.search.lucene import LuceneSearcher
-    # searcher = LuceneSearcher.from_prebuilt_index("msmarco-v1-passage")
+    from pyserini.search.lucene import LuceneSearcher
+
+    print("Downloading MS MARCO BM25 index (this may take a while)...")
+    print("Index will be cached in ~/.cache/pyserini/")
+
     # This triggers download if not cached
-    raise NotImplementedError("download_msmarco_index not yet implemented")
+    searcher = LuceneSearcher.from_prebuilt_index("msmarco-v1-passage")
+    print(f"Index loaded successfully: {searcher.num_docs:,} documents")
 
 
 def download_msmarco_queries(output_dir: Path, split: str = "train") -> None:
@@ -41,11 +49,16 @@ def download_msmarco_queries(output_dir: Path, split: str = "train") -> None:
         output_dir: Directory to save queries.
         split: Dataset split (train, dev, eval).
     """
-    # TODO: Implementation
-    # Hint:
-    # import ir_datasets
-    # dataset = ir_datasets.load(f"msmarco-passage/{split}")
-    raise NotImplementedError("download_msmarco_queries not yet implemented")
+    import ir_datasets
+
+    print(f"Loading MS MARCO queries ({split})...")
+
+    # This downloads the dataset if not cached
+    dataset = ir_datasets.load(f"msmarco-passage/{split}")
+
+    # Count queries
+    count = sum(1 for _ in dataset.queries_iter())
+    print(f"MS MARCO {split} queries available: {count:,}")
 
 
 def download_beir_dataset(dataset_name: str, output_dir: Path) -> None:
@@ -56,12 +69,27 @@ def download_beir_dataset(dataset_name: str, output_dir: Path) -> None:
         dataset_name: BEIR dataset name (e.g., "scifact").
         output_dir: Directory to save dataset.
     """
-    # TODO: Implementation
-    # Hint:
-    # from beir import util
-    # url = f"https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/{dataset_name}.zip"
-    # util.download_and_unzip(url, output_dir)
-    raise NotImplementedError("download_beir_dataset not yet implemented")
+    from beir import util
+
+    print(f"Downloading BEIR dataset: {dataset_name}...")
+
+    url = f"https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/{dataset_name}.zip"
+    data_path = util.download_and_unzip(url, str(output_dir / "beir"))
+
+    print(f"BEIR {dataset_name} downloaded to {data_path}")
+
+
+def verify_spacy_model() -> None:
+    """Verify spaCy model is available."""
+    try:
+        import spacy
+        nlp = spacy.load("en_core_web_sm")
+        print("spaCy model (en_core_web_sm) available")
+    except OSError:
+        print("Downloading spaCy model (en_core_web_sm)...")
+        import subprocess
+        subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"], check=True)
+        print("spaCy model downloaded")
 
 
 def main():
@@ -88,23 +116,27 @@ def main():
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(output_dir)
 
     print("=" * 60)
     print("ConstraintSuite - Data Download")
     print("=" * 60)
 
     # Download index
-    print("\n[1/3] Downloading MS MARCO BM25 index...")
+    print("\n[1/4] Downloading MS MARCO BM25 index...")
     download_msmarco_index(output_dir)
 
     if not args.index_only:
         # Download queries
-        print("\n[2/3] Downloading MS MARCO queries...")
+        print("\n[2/4] Downloading MS MARCO queries...")
         download_msmarco_queries(output_dir)
 
-        # Optionally download BEIR
-        print("\n[3/3] BEIR datasets (optional, skipping for now)")
+        # Verify spaCy model
+        print("\n[3/4] Verifying spaCy model...")
+        verify_spacy_model()
+
+        # BEIR datasets (optional)
+        print("\n[4/4] BEIR datasets (optional, skipping for now)")
 
     print("\n" + "=" * 60)
     print("Download complete!")

@@ -80,7 +80,7 @@ tagging:
 # Target sizes
 targets:
   # Main evaluation set
-  main_set_size: 2000
+  main_set_size: 5000
   # Gold (manually verified) set
   gold_set_size: 50
   # Non-flip control set

@@ -17,7 +17,17 @@ Usage:
 """
 
 import argparse
+import sys
 from pathlib import Path
+
+from tqdm import tqdm
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from constraintsuite.utils import load_config, setup_logging, load_jsonl, save_jsonl, ensure_dir
+from constraintsuite.filtering import batch_filter
+from constraintsuite.tagging import batch_tag, compute_distribution_stats, format_stats_report
 
 
 def main():
@@ -33,40 +43,75 @@ def main():
     parser.add_argument(
         "--input",
         type=str,
-        default="data/intermediate/raw_pairs.jsonl",
-        help="Input mined pairs"
+        default=None,
+        help="Input mined pairs (default: from config)"
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="data/intermediate/filtered_pairs.jsonl",
-        help="Output filtered and tagged pairs"
+        default=None,
+        help="Output filtered and tagged pairs (default: from config)"
     )
     parser.add_argument(
         "--rejected",
         type=str,
-        default="data/intermediate/rejected_pairs.jsonl",
-        help="Output rejected pairs (for debugging)"
+        default=None,
+        help="Output rejected pairs for debugging (default: from config)"
+    )
+    parser.add_argument(
+        "--save-rejected",
+        action="store_true",
+        default=True,
+        help="Save rejected pairs"
     )
     args = parser.parse_args()
+
+    # Load config
+    config = load_config(args.config)
+    logger = setup_logging(config.get("logging", {}).get("level", "INFO"))
+
+    # Set paths
+    input_path = args.input or Path(config["paths"]["intermediate"]) / "raw_pairs.jsonl"
+    output_path = args.output or Path(config["paths"]["intermediate"]) / "filtered_pairs.jsonl"
+    rejected_path = args.rejected or Path(config["paths"]["intermediate"]) / "rejected_pairs.jsonl"
+    ensure_dir(Path(output_path).parent)
 
     print("=" * 60)
     print("ConstraintSuite - Filter and Tag")
     print("=" * 60)
 
-    # TODO: Implementation
-    # 1. Load raw pairs
-    # 2. Apply filters (length, similarity, validity)
-    # 3. Tag passing pairs (difficulty, overlap, length)
-    # 4. Save filtered pairs and rejected pairs
+    # Load pairs
+    print(f"\n[1/4] Loading pairs from {input_path}...")
+    pairs = load_jsonl(input_path)
+    print(f"Loaded {len(pairs)} pairs")
 
-    print("\n[Not yet implemented]")
-    print("This script will:")
-    print(f"  1. Load pairs from {args.input}")
-    print("  2. Apply quality filters")
-    print("  3. Add difficulty tags")
-    print(f"  4. Save filtered to {args.output}")
-    print(f"  5. Save rejected to {args.rejected}")
+    # Filter pairs
+    print("\n[2/4] Filtering pairs...")
+    accepted, rejected = batch_filter(pairs, config, return_rejected=args.save_rejected)
+    print(f"Accepted: {len(accepted)}, Rejected: {len(rejected) if rejected else 0}")
+
+    # Tag accepted pairs
+    print("\n[3/4] Tagging pairs with difficulty...")
+    tagged = batch_tag(accepted, config)
+
+    # Save results
+    print(f"\n[4/4] Saving results...")
+    save_jsonl(tagged, output_path)
+    print(f"Saved {len(tagged)} filtered pairs to {output_path}")
+
+    if args.save_rejected and rejected:
+        save_jsonl(rejected, rejected_path)
+        print(f"Saved {len(rejected)} rejected pairs to {rejected_path}")
+
+    # Print statistics
+    stats = compute_distribution_stats(tagged)
+    print("\n" + "=" * 60)
+    print(format_stats_report(stats))
+    print("=" * 60)
+
+    print("\n" + "=" * 60)
+    print("Filter and tag complete!")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
