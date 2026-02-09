@@ -18,6 +18,7 @@ Metrics:
 
 import json
 import logging
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,7 @@ class EvaluationResult:
         slice_results: Results broken down by slice type.
         difficulty_results: Results broken down by difficulty.
     """
+
     model_name: str
     pairwise_accuracy: float
     mean_score_gap: float
@@ -70,7 +72,8 @@ class CrossEncoderScorer:
         self,
         model_name: str,
         device: str = "auto",
-        batch_size: int = 32
+        batch_size: int = 32,
+        cpu_threads: int | None = None,
     ):
         """
         Initialize cross-encoder scorer.
@@ -89,14 +92,33 @@ class CrossEncoderScorer:
         self.batch_size = batch_size
 
         # Determine device
+        import torch
+
         if device == "auto":
-            import torch
             if torch.cuda.is_available():
                 device = "cuda"
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 device = "mps"
             else:
                 device = "cpu"
+
+        if device == "cpu":
+            if cpu_threads is None:
+                detected = os.cpu_count() or 1
+                cpu_threads = max(1, detected - 1)
+            torch.set_num_threads(cpu_threads)
+            if hasattr(torch, "set_num_interop_threads"):
+                try:
+                    torch.set_num_interop_threads(max(1, cpu_threads // 2))
+                except RuntimeError:
+                    # PyTorch only allows this before parallel work starts in a process.
+                    logger.debug(
+                        "Could not reset PyTorch interop threads; keeping existing setting"
+                    )
+            logger.info(f"Configured PyTorch CPU threads: {cpu_threads}")
+        elif device == "mps":
+            # Prefer higher-throughput kernels on Apple Silicon.
+            torch.set_float32_matmul_precision("high")
 
         logger.info(f"Loading CrossEncoder: {model_name} on {device}")
         self.model = CrossEncoder(model_name, device=device)
@@ -122,7 +144,8 @@ class CrossEncoderScorer:
 
     def score_pairs(
         self,
-        pairs: list[tuple[str, str]]
+        pairs: list[tuple[str, str]],
+        show_progress_bar: bool | None = None,
     ) -> list[float]:
         """
         Score multiple query-document pairs.
@@ -141,18 +164,44 @@ class CrossEncoderScorer:
         if not pairs:
             return []
 
+        if show_progress_bar is None:
+            show_progress_bar = len(pairs) > 100
+
         scores = self.model.predict(
-            pairs,
-            batch_size=self.batch_size,
-            show_progress_bar=len(pairs) > 100
+            pairs, batch_size=self.batch_size, show_progress_bar=show_progress_bar
         )
         return [float(s) for s in scores]
 
 
+def _extract_example_fields(example: dict[str, Any]) -> dict[str, Any]:
+    """Normalize an example into fields used by evaluation."""
+    query_info = example.get("query", {})
+    if isinstance(query_info, dict):
+        q_neg = query_info.get("neg", query_info.get("negated", ""))
+        q_base = query_info.get("base", "")
+    else:
+        q_neg = str(query_info)
+        q_base = ""
+
+    doc_pos = example.get("doc_pos", example.get("docs", {}).get("pos", {}))
+    doc_neg = example.get("doc_neg", example.get("docs", {}).get("neg", {}))
+
+    text_pos = doc_pos.get("text", "") if isinstance(doc_pos, dict) else str(doc_pos)
+    text_neg = doc_neg.get("text", "") if isinstance(doc_neg, dict) else str(doc_neg)
+
+    return {
+        "q_neg": q_neg,
+        "q_base": q_base,
+        "text_pos": text_pos,
+        "text_neg": text_neg,
+        "id": example.get("id", example.get("query_id", "")),
+        "slice_type": example.get("slice_type", "unknown"),
+        "difficulty": example.get("tags", {}).get("difficulty", "unknown"),
+    }
+
+
 def evaluate_example(
-    scorer: CrossEncoderScorer,
-    example: dict[str, Any],
-    include_base_query: bool = True
+    scorer: CrossEncoderScorer, example: dict[str, Any], include_base_query: bool = True
 ) -> dict[str, Any]:
     """
     Evaluate a single example.
@@ -177,24 +226,16 @@ def evaluate_example(
         >>> print(f"Correct: {result['correct']}")
         >>> print(f"Score gap: {result['score_gap']:.4f}")
     """
-    # Extract data
-    query_info = example.get("query", {})
-    if isinstance(query_info, dict):
-        q_neg = query_info.get("neg", query_info.get("negated", ""))
-        q_base = query_info.get("base", "")
-    else:
-        q_neg = str(query_info)
-        q_base = ""
-
-    doc_pos = example.get("doc_pos", example.get("docs", {}).get("pos", {}))
-    doc_neg = example.get("doc_neg", example.get("docs", {}).get("neg", {}))
-
-    text_pos = doc_pos.get("text", "") if isinstance(doc_pos, dict) else str(doc_pos)
-    text_neg = doc_neg.get("text", "") if isinstance(doc_neg, dict) else str(doc_neg)
+    data = _extract_example_fields(example)
+    q_neg = data["q_neg"]
+    q_base = data["q_base"]
+    text_pos = data["text_pos"]
+    text_neg = data["text_neg"]
 
     # Score with negated query
-    score_pos = scorer.score(q_neg, text_pos)
-    score_neg = scorer.score(q_neg, text_neg)
+    neg_scores = scorer.score_pairs([(q_neg, text_pos), (q_neg, text_neg)], show_progress_bar=False)
+    score_pos = neg_scores[0]
+    score_neg = neg_scores[1]
     score_gap = score_pos - score_neg
     correct = score_pos > score_neg
 
@@ -207,19 +248,24 @@ def evaluate_example(
 
     # Optionally score with base query
     if include_base_query and q_base:
-        score_pos_base = scorer.score(q_base, text_pos)
-        score_neg_base = scorer.score(q_base, text_neg)
+        base_scores = scorer.score_pairs(
+            [(q_base, text_pos), (q_base, text_neg)], show_progress_bar=False
+        )
+        score_pos_base = base_scores[0]
+        score_neg_base = base_scores[1]
         score_gap_base = score_pos_base - score_neg_base
 
         # Query sensitivity: how much does adding negation change the gap?
         query_sensitivity = score_gap - score_gap_base
 
-        result.update({
-            "score_pos_base": score_pos_base,
-            "score_neg_base": score_neg_base,
-            "score_gap_base": score_gap_base,
-            "query_sensitivity": query_sensitivity,
-        })
+        result.update(
+            {
+                "score_pos_base": score_pos_base,
+                "score_neg_base": score_neg_base,
+                "score_gap_base": score_gap_base,
+                "query_sensitivity": query_sensitivity,
+            }
+        )
 
     return result
 
@@ -229,7 +275,8 @@ def evaluate_dataset(
     examples: list[dict[str, Any]],
     device: str = "auto",
     batch_size: int = 32,
-    include_base_query: bool = True
+    cpu_threads: int | None = None,
+    include_base_query: bool = True,
 ) -> EvaluationResult:
     """
     Evaluate a model on the full dataset.
@@ -239,6 +286,7 @@ def evaluate_dataset(
         examples: List of dataset examples.
         device: Device for inference.
         batch_size: Batch size.
+        cpu_threads: CPU threads for PyTorch CPU execution.
         include_base_query: Whether to compute query sensitivity.
 
     Returns:
@@ -252,15 +300,66 @@ def evaluate_dataset(
         >>> print(f"Accuracy: {results.pairwise_accuracy:.2%}")
         >>> print(f"Mean Δ: {results.mean_score_gap:.4f}")
     """
-    scorer = CrossEncoderScorer(model_name, device=device, batch_size=batch_size)
+    scorer = CrossEncoderScorer(
+        model_name=model_name,
+        device=device,
+        batch_size=batch_size,
+        cpu_threads=cpu_threads,
+    )
 
-    # Evaluate all examples
+    # Prepare all pairs once, then score in large batches to maximize accelerator throughput.
+    extracted = [_extract_example_fields(example) for example in examples]
+
+    neg_pairs: list[tuple[str, str]] = []
+    for item in extracted:
+        neg_pairs.append((item["q_neg"], item["text_pos"]))
+        neg_pairs.append((item["q_neg"], item["text_neg"]))
+    neg_scores = scorer.score_pairs(neg_pairs, show_progress_bar=len(neg_pairs) > 1000)
+
+    base_scores: list[float] = []
+    base_offsets: dict[int, int] = {}
+    if include_base_query:
+        base_pairs: list[tuple[str, str]] = []
+        for idx, item in enumerate(extracted):
+            if item["q_base"]:
+                base_offsets[idx] = len(base_pairs)
+                base_pairs.append((item["q_base"], item["text_pos"]))
+                base_pairs.append((item["q_base"], item["text_neg"]))
+        if base_pairs:
+            base_scores = scorer.score_pairs(base_pairs, show_progress_bar=len(base_pairs) > 1000)
+
     per_example_results = []
-    for example in tqdm(examples, desc="Evaluating"):
-        result = evaluate_example(scorer, example, include_base_query)
-        result["id"] = example.get("id", example.get("query_id", ""))
-        result["slice_type"] = example.get("slice_type", "unknown")
-        result["difficulty"] = example.get("tags", {}).get("difficulty", "unknown")
+    for idx, item in enumerate(tqdm(extracted, desc="Assembling metrics")):
+        neg_offset = idx * 2
+        score_pos = neg_scores[neg_offset]
+        score_neg = neg_scores[neg_offset + 1]
+        score_gap = score_pos - score_neg
+        correct = score_pos > score_neg
+
+        result = {
+            "id": item["id"],
+            "slice_type": item["slice_type"],
+            "difficulty": item["difficulty"],
+            "score_pos": score_pos,
+            "score_neg": score_neg,
+            "score_gap": score_gap,
+            "correct": correct,
+        }
+
+        base_offset = base_offsets.get(idx)
+        if include_base_query and base_offset is not None:
+            score_pos_base = base_scores[base_offset]
+            score_neg_base = base_scores[base_offset + 1]
+            score_gap_base = score_pos_base - score_neg_base
+            result.update(
+                {
+                    "score_pos_base": score_pos_base,
+                    "score_neg_base": score_neg_base,
+                    "score_gap_base": score_gap_base,
+                    "query_sensitivity": score_gap - score_gap_base,
+                }
+            )
+
         per_example_results.append(result)
 
     # Compute aggregate metrics
@@ -272,7 +371,11 @@ def evaluate_dataset(
     score_gap_std = np.std(score_gaps) if score_gaps else 0.0
 
     # Query sensitivity
-    sensitivities = [r.get("query_sensitivity") for r in per_example_results if r.get("query_sensitivity") is not None]
+    sensitivities = [
+        r.get("query_sensitivity")
+        for r in per_example_results
+        if r.get("query_sensitivity") is not None
+    ]
     mean_query_sensitivity = np.mean(sensitivities) if sensitivities else None
 
     # Compute slice results
@@ -298,9 +401,7 @@ def evaluate_dataset(
     )
 
 
-def evaluate_by_slice_from_results(
-    results: list[dict[str, Any]]
-) -> dict[str, dict[str, float]]:
+def evaluate_by_slice_from_results(results: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
     """Compute metrics broken down by slice type."""
     slice_results = defaultdict(lambda: {"correct": 0, "total": 0, "gaps": []})
 
@@ -323,7 +424,7 @@ def evaluate_by_slice_from_results(
 
 
 def evaluate_by_difficulty_from_results(
-    results: list[dict[str, Any]]
+    results: list[dict[str, Any]],
 ) -> dict[str, dict[str, float]]:
     """Compute metrics broken down by difficulty."""
     diff_results = defaultdict(lambda: {"correct": 0, "total": 0, "gaps": []})
@@ -346,9 +447,7 @@ def evaluate_by_difficulty_from_results(
     return output
 
 
-def evaluate_by_slice(
-    results: EvaluationResult
-) -> dict[str, dict[str, float]]:
+def evaluate_by_slice(results: EvaluationResult) -> dict[str, dict[str, float]]:
     """
     Break down results by slice type.
 
@@ -366,9 +465,7 @@ def evaluate_by_slice(
     return evaluate_by_slice_from_results(results.per_example_results)
 
 
-def evaluate_by_difficulty(
-    results: EvaluationResult
-) -> dict[str, dict[str, float]]:
+def evaluate_by_difficulty(results: EvaluationResult) -> dict[str, dict[str, float]]:
     """
     Break down results by difficulty.
 
@@ -387,9 +484,7 @@ def evaluate_by_difficulty(
 
 
 def compare_models(
-    model_names: list[str],
-    examples: list[dict[str, Any]],
-    **kwargs
+    model_names: list[str], examples: list[dict[str, Any]], **kwargs
 ) -> dict[str, EvaluationResult]:
     """
     Compare multiple models on the same dataset.
@@ -429,10 +524,7 @@ def compare_models(
     return results
 
 
-def export_results(
-    results: EvaluationResult,
-    output_path: str
-) -> None:
+def export_results(results: EvaluationResult, output_path: str) -> None:
     """
     Export evaluation results to JSON.
 

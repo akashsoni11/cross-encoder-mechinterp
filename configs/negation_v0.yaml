@@ -48,6 +48,8 @@ retrieval:
   method: "bm25"
   # Pyserini prebuilt index name
   index_name: "msmarco-v1-passage"
+  # Use most CPU cores for retrieval on large query batches
+  threads: 14
   # Number of candidates to retrieve per query
   k_pool: 200
   # BM25 parameters (default Pyserini values)
@@ -107,10 +109,12 @@ models:
   baseline_reranker: "cross-encoder/ms-marco-MiniLM-L6-v2"
   # Stronger reranker
   stronger_reranker: "BAAI/bge-reranker-base"
-  # Batch size for inference
-  batch_size: 32
-  # Device (auto, cuda, cpu)
-  device: "auto"
+  # Batch size for inference (increase further if memory allows)
+  batch_size: 96
+  # Device (auto, cuda, cpu, mps)
+  device: "mps"
+  # Used when forcing CPU inference
+  cpu_threads: 14
 
 # Evaluation metrics
 evaluation:

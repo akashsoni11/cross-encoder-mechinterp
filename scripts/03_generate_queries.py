@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -21,8 +22,8 @@ from tqdm import tqdm
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from constraintsuite.utils import load_config, setup_logging, save_jsonl, set_seed, ensure_dir
-from constraintsuite.data_loading import load_msmarco_queries
+from constraintsuite.utils import load_config, setup_logging, set_seed, ensure_dir
+from constraintsuite.data_loading import iter_queries
 from constraintsuite.query_generation import batch_generate_queries
 
 
@@ -49,6 +50,12 @@ def main():
         help="Limit number of queries to process"
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Batch size for query generation (default: from config or 50000)"
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -67,57 +74,82 @@ def main():
     # Set output path
     output_path = args.output or Path(config["paths"]["intermediate"]) / "negated_queries.jsonl"
     ensure_dir(Path(output_path).parent)
+    source_corpus = config.get("dataset", {}).get("source_corpus", "msmarco-passage")
+    generation_cfg = config.get("generation", {})
+    limit = args.limit if args.limit is not None else generation_cfg.get("limit")
+    batch_size = args.batch_size or generation_cfg.get("batch_size", 50000)
 
     print("=" * 60)
     print("ConstraintSuite - Query Generation")
     print("=" * 60)
 
-    # Load base queries
-    print("\n[1/3] Loading MS MARCO queries...")
-    base_queries = load_msmarco_queries("train", limit=args.limit)
-    print(f"Loaded {len(base_queries)} queries")
+    # Stream base queries and generated outputs in batches to avoid high peak memory.
+    print(f"\n[1/3] Streaming base queries from {source_corpus}...")
+    if limit is not None:
+        print(f"Limit: {limit:,} base queries")
+    print(f"Batch size: {batch_size:,} base queries")
 
-    # Convert to list of tuples
-    query_list = [(qid, text) for qid, text in base_queries.items()]
+    print("\n[2/3] Generating and writing negated queries...")
+    base_queries_seen = 0
+    generated_count = 0
+    template_counts = {}
 
-    # Generate negated queries
-    print("\n[2/3] Generating negated queries...")
-    generated = batch_generate_queries(query_list, config)
-    print(f"Generated {len(generated)} negated queries")
+    progress = tqdm(total=limit, desc="Base queries") if limit is not None else tqdm(
+        desc="Base queries", unit="query"
+    )
 
-    # Format for output
-    print("\n[3/3] Saving to JSONL...")
-    output_data = []
-    for query_id, gen_query in generated:
-        output_data.append({
-            "query_id": query_id,
-            "query": {
-                "base": gen_query.base,
-                "neg": gen_query.negated,
-            },
-            "template": gen_query.template,
-            "y": gen_query.y,
-            "y_forms": gen_query.y_surface_forms,
-        })
+    with open(output_path, "w", encoding="utf-8") as out_f:
+        for batch in iter_queries(source_corpus, split="train", batch_size=batch_size):
+            if limit is not None and base_queries_seen >= limit:
+                break
 
-    save_jsonl(output_data, output_path)
-    print(f"Saved {len(output_data)} queries to {output_path}")
+            if limit is not None:
+                remaining = limit - base_queries_seen
+                if remaining <= 0:
+                    break
+                if len(batch) > remaining:
+                    batch = batch[:remaining]
+
+            base_queries_seen += len(batch)
+            progress.update(len(batch))
+
+            generated = batch_generate_queries(batch, config)
+            for query_id, gen_query in generated:
+                out_f.write(
+                    json.dumps(
+                        {
+                            "query_id": query_id,
+                            "query": {
+                                "base": gen_query.base,
+                                "neg": gen_query.negated,
+                            },
+                            "template": gen_query.template,
+                            "y": gen_query.y,
+                            "y_forms": gen_query.y_surface_forms,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+                generated_count += 1
+                template_counts[gen_query.template] = template_counts.get(gen_query.template, 0) + 1
+
+    progress.close()
+    print(f"Saved {generated_count} queries to {output_path}")
 
     # Print statistics
     print("\n" + "=" * 60)
     print("Query Generation Statistics")
     print("=" * 60)
-    print(f"  Base queries: {len(base_queries)}")
-    print(f"  Generated queries: {len(generated)}")
-    print(f"  Success rate: {100 * len(generated) / len(base_queries):.1f}%")
+    print(f"  Base queries: {base_queries_seen}")
+    print(f"  Generated queries: {generated_count}")
+    success = (100 * generated_count / base_queries_seen) if base_queries_seen else 0
+    print(f"  Success rate: {success:.1f}%")
 
-    # Template distribution
-    template_counts = {}
-    for _, gen_query in generated:
-        template_counts[gen_query.template] = template_counts.get(gen_query.template, 0) + 1
     print("\nTemplate distribution:")
     for template, count in sorted(template_counts.items()):
-        print(f"  {template}: {count} ({100 * count / len(generated):.1f}%)")
+        pct = (100 * count / generated_count) if generated_count else 0
+        print(f"  {template}: {count} ({pct:.1f}%)")
 
     print("\n" + "=" * 60)
     print("Query generation complete!")

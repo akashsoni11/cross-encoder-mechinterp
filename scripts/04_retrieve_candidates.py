@@ -11,6 +11,8 @@ Usage:
 """
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -19,55 +21,43 @@ from tqdm import tqdm
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from constraintsuite.utils import load_config, setup_logging, load_jsonl, save_jsonl, ensure_dir
-from constraintsuite.retrieval import BM25Retriever
+from constraintsuite.utils import ensure_dir, load_config, load_jsonl, setup_logging
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Retrieve candidate documents using BM25"
+    parser = argparse.ArgumentParser(description="Retrieve candidate documents using BM25")
+    parser.add_argument(
+        "--config", type=str, default="configs/negation_v0.yaml", help="Path to configuration file"
     )
     parser.add_argument(
-        "--config",
-        type=str,
-        default="configs/negation_v0.yaml",
-        help="Path to configuration file"
+        "--queries", type=str, default=None, help="Input negated queries (default: from config)"
     )
     parser.add_argument(
-        "--queries",
-        type=str,
-        default=None,
-        help="Input negated queries (default: from config)"
+        "--output", type=str, default=None, help="Output path for candidates (default: from config)"
     )
     parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help="Output path for candidates (default: from config)"
-    )
-    parser.add_argument(
-        "--k",
-        type=int,
-        default=None,
-        help="Number of candidates per query (default: from config)"
+        "--k", type=int, default=None, help="Number of candidates per query (default: from config)"
     )
     parser.add_argument(
         "--threads",
         type=int,
-        default=8,
-        help="Number of retrieval threads"
+        default=None,
+        help="Number of retrieval threads (default: from config or CPU count)",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=1000,
-        help="Batch size for retrieval"
+        default=None,
+        help="Batch size for retrieval (default: from config or 1000)",
     )
     args = parser.parse_args()
 
     # Load config
     config = load_config(args.config)
-    logger = setup_logging(config.get("logging", {}).get("level", "INFO"))
+    setup_logging(config.get("logging", {}).get("level", "INFO"))
+
+    # Import lazily so --help works even when Java/Pyserini is not installed yet.
+    from constraintsuite.retrieval import BM25Retriever
 
     # Set paths
     queries_path = args.queries or Path(config["paths"]["intermediate"]) / "negated_queries.jsonl"
@@ -95,48 +85,62 @@ def main():
     print(f"Index loaded: {len(retriever):,} documents")
 
     # Retrieve candidates
-    print(f"\n[3/3] Retrieving top-{k} candidates per query...")
+    retrieval_threads = (
+        args.threads
+        or config.get("retrieval", {}).get("threads")
+        or max(1, (os.cpu_count() or 1) - 1)
+    )
+    batch_size = args.batch_size or config.get("retrieval", {}).get("batch_size", 1000)
 
-    # Process in batches
-    results = []
-    for i in tqdm(range(0, len(queries), args.batch_size), desc="Batches"):
-        batch = queries[i:i + args.batch_size]
+    print(
+        f"\n[3/3] Retrieving top-{k} candidates/query with "
+        f"{retrieval_threads} threads, batch_size={batch_size}..."
+    )
 
-        # Prepare batch for retrieval
-        batch_queries = [
-            (q["query_id"], q["query"]["neg"])
-            for q in batch
-        ]
+    # Process in batches and stream to disk to keep memory bounded.
+    total_results = 0
+    total_candidates = 0
+    with open(output_path, "w", encoding="utf-8") as out_f:
+        for i in tqdm(range(0, len(queries), batch_size), desc="Batches"):
+            batch = queries[i : i + batch_size]
 
-        # Batch retrieve
-        batch_results = retriever.retrieve_batch(batch_queries, k=k, threads=args.threads)
+            # Prepare batch for retrieval
+            batch_queries = [(q["query_id"], q["query"]["neg"]) for q in batch]
 
-        # Combine with original query data
-        for q in batch:
-            qid = q["query_id"]
-            candidates = batch_results.get(qid, [])
+            # Batch retrieve
+            batch_results = retriever.retrieve_batch(batch_queries, k=k, threads=retrieval_threads)
 
-            results.append({
-                "query_id": qid,
-                "query": q["query"],
-                "y": q["y"],
-                "y_forms": q["y_forms"],
-                "template": q["template"],
-                "candidates": candidates,
-            })
+            # Combine with original query data
+            for q in batch:
+                qid = q["query_id"]
+                candidates = batch_results.get(qid, [])
+                total_candidates += len(candidates)
 
-    # Save results
-    save_jsonl(results, output_path)
-    print(f"\nSaved {len(results)} query results to {output_path}")
+                out_f.write(
+                    json.dumps(
+                        {
+                            "query_id": qid,
+                            "query": q["query"],
+                            "y": q["y"],
+                            "y_forms": q["y_forms"],
+                            "template": q["template"],
+                            "candidates": candidates,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+                total_results += 1
+
+    print(f"\nSaved {total_results} query results to {output_path}")
 
     # Statistics
-    total_candidates = sum(len(r["candidates"]) for r in results)
-    avg_candidates = total_candidates / len(results) if results else 0
+    avg_candidates = total_candidates / total_results if total_results else 0
 
     print("\n" + "=" * 60)
     print("Retrieval Statistics")
     print("=" * 60)
-    print(f"  Queries processed: {len(results)}")
+    print(f"  Queries processed: {total_results}")
     print(f"  Total candidates: {total_candidates:,}")
     print(f"  Avg candidates/query: {avg_candidates:.1f}")
 

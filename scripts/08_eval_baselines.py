@@ -19,72 +19,65 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from constraintsuite.utils import load_config, setup_logging, load_jsonl, ensure_dir
 from constraintsuite.evaluation import (
     evaluate_dataset,
-    compare_models,
     export_results,
     format_results_report,
 )
+from constraintsuite.utils import ensure_dir, load_config, load_jsonl, setup_logging
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Evaluate baseline rerankers on ConstraintSuite"
+    parser = argparse.ArgumentParser(description="Evaluate baseline rerankers on ConstraintSuite")
+    parser.add_argument(
+        "--config", type=str, default="configs/negation_v0.yaml", help="Path to configuration file"
     )
     parser.add_argument(
-        "--config",
-        type=str,
-        default="configs/negation_v0.yaml",
-        help="Path to configuration file"
-    )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default=None,
-        help="Path to dataset (default: from config)"
+        "--dataset", type=str, default=None, help="Path to dataset (default: from config)"
     )
     parser.add_argument(
         "--model",
         type=str,
         default=None,
-        help="Specific model to evaluate (default: all from config)"
+        help="Specific model to evaluate (default: all from config)",
     )
     parser.add_argument(
-        "--output",
-        type=str,
-        default="results/baseline_eval.json",
-        help="Output path for results"
+        "--output", type=str, default="results/baseline_eval.json", help="Output path for results"
     )
     parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        help="Device for inference (auto, cuda, cpu, mps)"
+        "--device", type=str, default="auto", help="Device for inference (auto, cuda, cpu, mps)"
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=None,
-        help="Batch size for inference (default: from config)"
+        help="Batch size for inference (default: from config)",
+    )
+    parser.add_argument(
+        "--cpu-threads", type=int, default=None, help="CPU threads for PyTorch when running on CPU"
     )
     parser.add_argument(
         "--include-base-query",
         action="store_true",
-        default=True,
-        help="Include base query scoring for sensitivity analysis"
+        help="Include base query scoring for sensitivity analysis",
+    )
+    parser.add_argument(
+        "--no-include-base-query",
+        action="store_true",
+        help="Disable base query scoring for faster evaluation",
     )
     args = parser.parse_args()
 
     # Load config
     config = load_config(args.config)
-    logger = setup_logging(config.get("logging", {}).get("level", "INFO"))
+    setup_logging(config.get("logging", {}).get("level", "INFO"))
 
     # Set paths
     dataset_path = args.dataset or Path(config["paths"]["release"]) / "main.jsonl"
@@ -94,6 +87,19 @@ def main():
     # Get model config
     model_config = config.get("models", {})
     batch_size = args.batch_size or model_config.get("batch_size", 32)
+    default_device = model_config.get("device", "auto")
+    device = args.device if args.device != "auto" else default_device
+    cpu_threads = args.cpu_threads or model_config.get("cpu_threads")
+    include_base_query = config.get("evaluation", {}).get("include_base_query", True)
+    if args.include_base_query:
+        include_base_query = True
+    if args.no_include_base_query:
+        include_base_query = False
+
+    # When no explicit cpu thread setting is provided, keep one core free for OS responsiveness.
+    if cpu_threads is None and device == "cpu":
+        detected = os.cpu_count() or 1
+        cpu_threads = max(1, detected - 1)
 
     # Determine models to evaluate
     if args.model:
@@ -116,24 +122,30 @@ def main():
     # Evaluate models
     print(f"\n[2/3] Evaluating {len(models)} model(s)...")
     all_results = {}
+    failed_models = {}
 
     for model_name in models:
         print(f"\n{'=' * 60}")
         print(f"Evaluating: {model_name}")
         print("=" * 60)
+        try:
+            result = evaluate_dataset(
+                model_name=model_name,
+                examples=examples,
+                device=device,
+                batch_size=batch_size,
+                cpu_threads=cpu_threads,
+                include_base_query=include_base_query,
+            )
+            all_results[model_name] = result
+            print("\n" + format_results_report(result))
+        except Exception as e:
+            failed_models[model_name] = str(e)
+            print(f"Model failed and will be skipped: {model_name}")
+            print(f"Reason: {e}")
 
-        result = evaluate_dataset(
-            model_name=model_name,
-            examples=examples,
-            device=args.device,
-            batch_size=batch_size,
-            include_base_query=args.include_base_query
-        )
-
-        all_results[model_name] = result
-
-        # Print results
-        print("\n" + format_results_report(result))
+    if not all_results:
+        raise RuntimeError("No model evaluations succeeded")
 
     # Save results
     print(f"\n[3/3] Saving results to {output_path}...")
@@ -148,6 +160,7 @@ def main():
     # Save summary
     summary = {
         "models": list(all_results.keys()),
+        "failed_models": failed_models,
         "dataset": str(dataset_path),
         "num_examples": len(examples),
         "results": {
@@ -160,7 +173,7 @@ def main():
                 "difficulty_results": r.difficulty_results,
             }
             for name, r in all_results.items()
-        }
+        },
     }
 
     with open(output_path, "w") as f:
@@ -180,6 +193,10 @@ def main():
         short_name = name.split("/")[-1] if "/" in name else name
         print(f"{short_name:<45} {result.pairwise_accuracy:>10.2%}")
     print("-" * 60)
+    if failed_models:
+        print("\nFailed models:")
+        for name, err in failed_models.items():
+            print(f"  {name}: {err}")
 
     print("\n" + "=" * 60)
     print("Baseline evaluation complete!")

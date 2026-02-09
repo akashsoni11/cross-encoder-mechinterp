@@ -1,0 +1,38 @@
+# ConstraintSuite: Activation Patching Configuration
+# ==================================================
+# Configuration for causal localization experiments
+# using activation patching on cross-encoder rerankers.
+
+patching:
+  # Target model (6 layers, 12 heads, 384 hidden dim)
+  model_name: "cross-encoder/ms-marco-MiniLM-L6-v2"
+  # Device for inference (auto, cuda, cpu, mps)
+  device: "mps"
+  # Fixed padding length (must match between clean/corrupt)
+  max_length: 256
+  # Corruption strategy: swap doc_pos for doc_neg
+  corruption: "doc_swap"
+  # Scan type: "component" (25 sites) or "head" (72 sites)
+  scan_type: "component"
+  # Checkpoint every N examples
+  checkpoint_every: 100
+  # Directory for results and checkpoints
+  checkpoint_dir: "results/patching"
+  # Minimum |clean_score - corrupt_score| to include an example
+  min_total_effect: 0.5
+  # Threshold for identifying "hot" components
+  hot_threshold: 0.1
+
+ablation:
+  # Ablation method: "zero" or "mean"
+  method: "zero"
+  # Number of random control ablations for comparison
+  n_random_controls: 5
+
+dataset:
+  # Main dataset (10K examples)
+  main_path: "data/release/negation_v1/main.jsonl"
+  # Gold curated set (15 examples)
+  gold_path: "data/release/negation_v1/gold_curated.jsonl"
+
+random_seed: 42

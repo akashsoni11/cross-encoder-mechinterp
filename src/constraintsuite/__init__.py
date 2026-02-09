@@ -88,6 +88,14 @@ def __getattr__(name):
     ):
         import constraintsuite.llm_utils as _llm
         return getattr(_llm, name)
+    if name in (
+        "PatchableModel", "PatchingSite", "PatchingResult", "ScanResult", "AblationResult",
+        "get_component_sites", "get_head_sites", "get_hot_sites",
+        "run_component_scan", "run_head_scan", "run_ablation_study",
+        "plot_component_heatmap", "plot_head_heatmap",
+    ):
+        import constraintsuite.patching as _patch
+        return getattr(_patch, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
@@ -145,4 +153,18 @@ __all__ = [
     "classify_ambiguous_pair",
     "batch_validate_gold_set",
     "batch_fix_grammar",
+    # Activation patching
+    "PatchableModel",
+    "PatchingSite",
+    "PatchingResult",
+    "ScanResult",
+    "AblationResult",
+    "get_component_sites",
+    "get_head_sites",
+    "get_hot_sites",
+    "run_component_scan",
+    "run_head_scan",
+    "run_ablation_study",
+    "plot_component_heatmap",
+    "plot_head_heatmap",
 ]
